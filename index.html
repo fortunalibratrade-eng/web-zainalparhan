@@ -879,8 +879,22 @@ body.loading .app, body.loading .bottom-nav, body.loading .neu-fab{opacity:0; tr
             <div class="field"><label>Tanggal Mulai</label><input class="neu-input admin-only-input" type="date" id="setTglMulai"></div>
             <div class="field"><label>Tanggal Selesai</label><input class="neu-input admin-only-input" type="date" id="setTglSelesai"></div>
           </div>
-          <div class="field"><label>Iuran per Hari / Anggota (Rp)</label><input class="neu-input admin-only-input" type="number" min="0" id="setIuran" placeholder="contoh: 5000">
+          <div class="field"><label>Iuran per Hari / Anggota (Rp) — nominal tunggal</label><input class="neu-input admin-only-input" type="number" min="0" id="setIuran" placeholder="contoh: 5000">
             <div class="hint" id="setIuranHint">Total iuran wajib per anggota dihitung otomatis dari jumlah hari × nominal ini (maksimal Rp700.000 per anggota).</div>
+          </div>
+
+          <div class="section-title">Skema Iuran Bertahap (opsional)</div>
+          <div class="hint" style="margin-top:-8px;margin-bottom:12px;">Gunakan ini jika nominal iuran per hari berubah-ubah di beberapa rentang tanggal (misal kas naik/turun tiap minggu). Jika ada minimal 1 periode di sini, sistem akan memakai skema ini dan <b>mengabaikan</b> nominal tunggal di atas.</div>
+          <div id="iuranPeriodeList"></div>
+          <div class="admin-only" id="iuranPeriodeAddWrap" style="margin-top:10px;padding:14px;border-radius:14px;background:var(--panel-alt);">
+            <div class="field-row">
+              <div class="field" style="margin-bottom:12px;"><label>Dari Tanggal</label><input class="neu-input" type="date" id="fPeriodeDari"></div>
+              <div class="field" style="margin-bottom:12px;"><label>Sampai Tanggal</label><input class="neu-input" type="date" id="fPeriodeSampai"></div>
+            </div>
+            <div class="field" style="margin-bottom:12px;"><label>Nominal per Hari pada Rentang Ini (Rp)</label><input class="neu-input" type="number" min="0" id="fPeriodeNominal" placeholder="contoh: 20000"></div>
+            <button class="neu-btn primary sm" id="addPeriodeBtn" style="width:100%;justify-content:center;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Tambah Periode
+            </button>
           </div>
 
           <div class="section-title">Tautan</div>
@@ -980,6 +994,7 @@ const DEFAULT_SETTINGS = {
   tglMulai: "",
   tglSelesai: "",
   iuranPerHari: 0,
+  iuranPeriode: [], // skema iuran bertahap: [{id, dari, sampai, nominal}] — nominal per hari untuk rentang tanggal tsb
   igLink: "https://www.instagram.com/kkl.kualasecapah_1",
   driveLink: "https://drive.google.com/drive/folders/1F1230djDkmmANzsWEr5bmKas-5hUuR8r",
   kategoriPemasukan: ["Iuran Anggota", "Donasi", "Sponsor / Kerjasama", "Lainnya"],
@@ -1416,7 +1431,19 @@ function hariBerjalan(){
 function totalPemasukan(){ return state.transaksi.filter(t => t.jenis === 'pemasukan').reduce((s,t) => s + Number(t.jumlah||0), 0); }
 function totalPengeluaran(){ return state.transaksi.filter(t => t.jenis === 'pengeluaran').reduce((s,t) => s + Number(t.jumlah||0), 0); }
 function saldoKas(){ return totalPemasukan() - totalPengeluaran(); }
-function iuranWajibPerOrang(){ return Math.min(totalHariKKL() * Number(state.settings.iuranPerHari||0), IURAN_MAX); }
+function iuranPeriodeList(){ return state.settings.iuranPeriode || []; }
+function totalHariPeriode(p){ return daysBetweenInclusive(p.dari, p.sampai); }
+// Total iuran harian mentah (sebelum dibatasi maks. per anggota).
+// Jika ada skema periode (nominal berubah-ubah antar rentang tanggal), pakai itu.
+// Jika belum ada periode sama sekali, pakai cara lama: total hari KKL x satu nominal per hari (kompatibilitas mundur).
+function totalIuranHarianRaw(){
+  const periods = iuranPeriodeList();
+  if(periods.length){
+    return periods.reduce((sum,p) => sum + totalHariPeriode(p) * Number(p.nominal||0), 0);
+  }
+  return totalHariKKL() * Number(state.settings.iuranPerHari||0);
+}
+function iuranWajibPerOrang(){ return Math.min(totalIuranHarianRaw(), IURAN_MAX); }
 function iuranTerbayar(anggotaId){
   return state.transaksi.filter(t => t.jenis==='pemasukan' && t.kategori==='Iuran Anggota' && t.anggotaId===anggotaId).reduce((s,t)=>s+Number(t.jumlah||0),0);
 }
@@ -1905,12 +1932,19 @@ function renderPengaturan(){
   $('#setIg').value = state.settings.igLink || '';
   $('#setDrive').value = state.settings.driveLink || '';
   const total = totalHariKKL();
-  const rawIuran = total*(state.settings.iuranPerHari||0);
+  const periods = iuranPeriodeList();
+  const rawIuran = totalIuranHarianRaw();
   const cappedIuran = iuranWajibPerOrang();
-  $('#setIuranHint').textContent = total>0
-    ? `Total hari KKL: ${total} hari → iuran wajib per anggota: ${formatRupiah(cappedIuran)}${rawIuran > IURAN_MAX ? ` (dibatasi maksimal ${formatRupiah(IURAN_MAX)}, sebelum dibatasi: ${formatRupiah(rawIuran)})` : ''}`
-    : `Isi tanggal mulai & selesai untuk menghitung total iuran wajib (maksimal ${formatRupiah(IURAN_MAX)} per anggota).`;
+  if(periods.length){
+    $('#setIuranHint').textContent = `Skema bertahap aktif (${periods.length} periode) — total iuran wajib per anggota: ${formatRupiah(cappedIuran)}${rawIuran > IURAN_MAX ? ` (dibatasi maksimal ${formatRupiah(IURAN_MAX)}, sebelum dibatasi: ${formatRupiah(rawIuran)})` : ''}. Nominal tunggal di atas tidak dipakai selama skema periode masih ada.`;
+  } else {
+    $('#setIuranHint').textContent = total>0
+      ? `Total hari KKL: ${total} hari → iuran wajib per anggota: ${formatRupiah(cappedIuran)}${rawIuran > IURAN_MAX ? ` (dibatasi maksimal ${formatRupiah(IURAN_MAX)}, sebelum dibatasi: ${formatRupiah(rawIuran)})` : ''}`
+      : `Isi tanggal mulai & selesai untuk menghitung total iuran wajib (maksimal ${formatRupiah(IURAN_MAX)} per anggota).`;
+  }
   $$('.admin-only-input').forEach(el => el.disabled = !isAdmin);
+
+  renderIuranPeriode();
 
   $('#chipPemasukan').innerHTML = state.settings.kategoriPemasukan.map((k,i) => chipHtml(k,'pemasukan',i)).join('');
   $('#chipPengeluaran').innerHTML = state.settings.kategoriPengeluaran.map((k,i) => chipHtml(k,'pengeluaran',i)).join('');
@@ -1919,6 +1953,33 @@ function renderPengaturan(){
 }
 function chipHtml(k, kind, i){
   return `<div class="chip">${escapeHtml(k)}<button class="admin-only inline-flex" data-del-kat="${kind}:${i}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>`;
+}
+function renderIuranPeriode(){
+  const wrap = $('#iuranPeriodeList');
+  if(!wrap) return;
+  const list = [...iuranPeriodeList()].sort((a,b) => (a.dari||'').localeCompare(b.dari||''));
+  if(!list.length){
+    wrap.innerHTML = emptyStateHtml('Belum ada periode iuran', 'Tambahkan periode di bawah jika nominal iuran per hari berubah-ubah');
+    return;
+  }
+  wrap.innerHTML = list.map(p => {
+    const hari = totalHariPeriode(p);
+    const subtotal = hari * Number(p.nominal||0);
+    return `<div class="list-row">
+      <div class="lr-left">
+        <div class="lr-avatar" style="font-size:11px;">${hari}h</div>
+        <div>
+          <div class="lr-title">${formatDate(p.dari)} — ${formatDate(p.sampai)}</div>
+          <div class="lr-sub">${formatRupiah(p.nominal)}/hari · Subtotal ${formatRupiah(subtotal)}</div>
+        </div>
+      </div>
+      <div class="lr-right">
+        <div class="row-actions admin-only">
+          <button class="del" data-del-periode="${p.id}" title="Hapus periode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') + `<div class="hint" style="margin-top:6px;">Total gabungan seluruh periode: <b>${formatRupiah(list.reduce((s,p)=>s+totalHariPeriode(p)*Number(p.nominal||0),0))}</b>${list.reduce((s,p)=>s+totalHariPeriode(p)*Number(p.nominal||0),0) > IURAN_MAX ? ` (akan dibatasi maksimal ${formatRupiah(IURAN_MAX)} per anggota)` : ''}</div>`;
 }
 
 /* ---------- 18b. RENDER: KALENDER ---------- */
@@ -2049,6 +2110,14 @@ function bindDynamicButtons(){
     await saveSettings({[key]: arr});
     showToast('Kategori dihapus', 'ok');
   });
+  $$('[data-del-periode]').forEach(b => b.onclick = () => {
+    if(!requireAdmin()) return;
+    confirmAction('Hapus Periode Iuran', 'Periode skema iuran ini akan dihapus. Perhitungan iuran wajib anggota akan diperbarui otomatis.', async () => {
+      const arr = iuranPeriodeList().filter(p => p.id !== b.dataset.delPeriode);
+      await saveSettings({iuranPeriode: arr});
+      showToast('Periode iuran dihapus', 'ok');
+    });
+  });
 }
 
 /* ---------- 21. STATIC BUTTON BINDING ---------- */
@@ -2076,6 +2145,20 @@ $('#saveSettingsBtn').addEventListener('click', async () => {
     driveLink: $('#setDrive').value.trim()
   });
   showToast('Pengaturan disimpan', 'ok');
+});
+
+$('#addPeriodeBtn').addEventListener('click', async () => {
+  if(!requireAdmin()) return;
+  const dari = $('#fPeriodeDari').value;
+  const sampai = $('#fPeriodeSampai').value;
+  const nominal = Number($('#fPeriodeNominal').value);
+  if(!dari || !sampai){ showToast('Isi tanggal mulai dan selesai periode', 'warn'); return; }
+  if(sampai < dari){ showToast('Tanggal selesai harus setelah tanggal mulai', 'warn'); return; }
+  if(!nominal || nominal <= 0){ showToast('Nominal per hari harus lebih dari 0', 'warn'); return; }
+  const arr = [...iuranPeriodeList(), {id: uid(), dari, sampai, nominal}];
+  await saveSettings({iuranPeriode: arr});
+  $('#fPeriodeDari').value=''; $('#fPeriodeSampai').value=''; $('#fPeriodeNominal').value='';
+  showToast('Periode iuran ditambahkan', 'ok');
 });
 
 $('#addKatPemasukanBtn').addEventListener('click', async () => {
@@ -2171,8 +2254,8 @@ async function exportExcel(){
       ['Lokasi Kegiatan', state.settings.lokasi || '-'],
       ['Periode KKL', (state.settings.tglMulai?formatDate(state.settings.tglMulai):'-') + '  s/d  ' + (state.settings.tglSelesai?formatDate(state.settings.tglSelesai):'-')],
       ['Total Hari KKL', total ? (total + ' hari (berjalan ' + elapsed + ' hari)') : '-'],
-      ['Iuran per Hari / Anggota', formatRupiah(state.settings.iuranPerHari||0)],
-      ['Iuran Wajib per Anggota', formatRupiah(iuranWajibPerOrang()) + (total*(state.settings.iuranPerHari||0) > IURAN_MAX ? ' (dibatasi maks. ' + formatRupiah(IURAN_MAX) + ')' : '')],
+      ['Skema Iuran', iuranPeriodeList().length ? (iuranPeriodeList().length + ' periode bertahap') : ('Tunggal ' + formatRupiah(state.settings.iuranPerHari||0) + '/hari')],
+      ['Iuran Wajib per Anggota', formatRupiah(iuranWajibPerOrang()) + (totalIuranHarianRaw() > IURAN_MAX ? ' (dibatasi maks. ' + formatRupiah(IURAN_MAX) + ')' : '')],
     ];
     let r = 4;
     infoRows.forEach(([label, val]) => {
